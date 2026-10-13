@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Transformer Explainer — Interactive GPT-2 Visualization</title>
+  <meta name="description" content="Interactive visualization tool to learn how GPT-2 Transformer works. Run a live model in your browser." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <!-- KaTeX for math rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+  <!-- D3 for visualizations -->
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+  <!-- ── TOP BAR ─────────────────────────────────────────── -->
+  <header id="topbar">
+    <div class="topbar-left">
+      <div class="logo-group">
+        <svg class="logo-icon" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="8" fill="url(#grad1)"/>
+          <defs>
+            <linearGradient id="grad1" x1="0" y1="0" x2="32" y2="32">
+              <stop offset="0%" stop-color="#7c3aed"/>
+              <stop offset="100%" stop-color="#2563eb"/>
+            </linearGradient>
+          </defs>
+          <path d="M8 16h16M16 8v16M10 10l12 12M22 10L10 22" stroke="white" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span class="logo-text">Transformer <strong>Explainer</strong></span>
+      </div>
+    </div>
+    <div class="topbar-center">
+      <div class="model-badge">GPT-2</div>
+      <span class="model-label">Live Model Running</span>
+      <div id="status-dot" class="status-dot loading"></div>
+    </div>
+    <div class="topbar-right">
+      <button id="btn-textbook" class="btn-ghost" onclick="toggleTextbook()">📖 Textbook</button>
+      <a href="https://arxiv.org/abs/2408.04619" target="_blank" class="btn-ghost">📄 Paper</a>
+    </div>
+  </header>
+
+  <!-- ── MAIN LAYOUT ────────────────────────────────────────── -->
+  <div id="app-layout">
+
+    <!-- TEXTBOOK SIDEBAR -->
+    <aside id="textbook-panel" class="open">
+      <div class="textbook-header">
+        <span>📖 How GPT-2 Works</span>
+        <button class="close-btn" onclick="toggleTextbook()">✕</button>
+      </div>
+      <nav class="textbook-nav">
+        <button class="tb-item active" onclick="showTextbookPage('overview')">Overview</button>
+        <button class="tb-item" onclick="showTextbookPage('tokenization')">1. Tokenization</button>
+        <button class="tb-item" onclick="showTextbookPage('embedding')">2. Embedding</button>
+        <button class="tb-item" onclick="showTextbookPage('attention')">3. Self-Attention</button>
+        <button class="tb-item" onclick="showTextbookPage('mlp')">4. MLP / FFN</button>
+        <button class="tb-item" onclick="showTextbookPage('softmax')">5. Softmax Output</button>
+      </nav>
+      <div id="textbook-content" class="textbook-content">
+        <!-- filled by JS -->
+      </div>
+    </aside>
+
+    <!-- MAIN VISUALIZATION AREA -->
+    <main id="viz-area">
+
+      <!-- INPUT SECTION -->
+      <section id="input-section">
+        <div class="input-card">
+          <div class="input-header">
+            <span class="input-label">Input Text</span>
+            <div class="examples-row">
+              <span class="ex-label">Examples:</span>
+              <button class="ex-btn" onclick="loadExample(0)">Data visualization…</button>
+              <button class="ex-btn" onclick="loadExample(1)">Artificial Intelligence…</button>
+              <button class="ex-btn" onclick="loadExample(2)">As the spaceship…</button>
+              <button class="ex-btn" onclick="loadExample(3)">On the deserted planet…</button>
+              <button class="ex-btn" onclick="loadExample(4)">IEEE VIS conference…</button>
+            </div>
+          </div>
+          <div class="input-row">
+            <textarea id="input-text" rows="2" placeholder="Type your text here…">Data visualization empowers users to</textarea>
+            <button id="run-btn" onclick="runModel()">
+              <span id="run-btn-label">▶ Run</span>
+              <div id="run-spinner" class="spinner hidden"></div>
+            </button>
+          </div>
+          <div class="sampling-row">
+            <label>Temperature: <input id="temperature" type="range" min="0.1" max="2" step="0.05" value="0.8" oninput="updateTempLabel(this.value)" /></label>
+            <span id="temp-label" class="value-label">0.8</span>
+            <label style="margin-left:1.5rem">Sampling:
+              <select id="sampling-type" onchange="updateSamplingUI()">
+                <option value="top-k">Top-K</option>
+                <option value="top-p">Top-P</option>
+              </select>
+            </label>
+            <label id="sampling-value-label">K =
+              <input id="sampling-value" type="number" min="1" max="50" value="5" style="width:4rem" />
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- PIPELINE STAGES -->
+      <section id="pipeline">
+        <div class="pipeline-scroll">
+
+          <!-- Stage 1: Tokens -->
+          <div class="pipe-stage" id="stage-tokens">
+            <div class="stage-header">
+              <span class="stage-title">Tokens</span>
+              <span class="stage-sub">Input tokenized</span>
+            </div>
+            <div id="tokens-display" class="tokens-grid"></div>
+          </div>
+
+          <!-- Stage 2: Embedding -->
+          <div class="pipe-arrow">→</div>
+          <div class="pipe-stage" id="stage-embedding">
+            <div class="stage-header">
+              <span class="stage-title">Embedding</span>
+              <span class="stage-sub">Token + Position</span>
+            </div>
+            <div id="embedding-display" class="embedding-grid"></div>
+          </div>
+
+          <!-- Stage 3: Transformer Blocks -->
+          <div class="pipe-arrow">→</div>
+          <div class="pipe-stage wide" id="stage-blocks">
+            <div class="stage-header">
+              <span class="stage-title">Transformer Blocks × 12</span>
+              <span class="stage-sub">Self-Attention + MLP</span>
+            </div>
+            <div class="blocks-layout">
+              <!-- Attention Matrix -->
+              <div class="block-card attention-card" onclick="togglePanel('attention-panel')">
+                <div class="block-title">🔍 Self-Attention</div>
+                <div id="attn-mini-preview" class="attn-mini"></div>
+              </div>
+              <!-- MLP -->
+              <div class="block-card mlp-card">
+                <div class="block-title">⚡ MLP / FFN</div>
+                <div class="mlp-visual">
+                  <div class="mlp-box">x768</div>
+                  <div class="mlp-arrow">→ ×4</div>
+                  <div class="mlp-box">x3072</div>
+                  <div class="mlp-arrow">GELU→</div>
+                  <div class="mlp-box">x768</div>
+                </div>
+              </div>
+            </div>
+            <div class="block-nav">
+              <button id="prev-block" onclick="changeBlock(-1)" disabled>◀</button>
+              <span id="block-indicator">Block 1 / 12</span>
+              <button id="next-block" onclick="changeBlock(1)">▶</button>
+            </div>
+          </div>
+
+          <!-- Stage 4: Linear + Softmax -->
+          <div class="pipe-arrow">→</div>
+          <div class="pipe-stage" id="stage-softmax">
+            <div class="stage-header">
+              <span class="stage-title">Linear + Softmax</span>
+              <span class="stage-sub">Next token probabilities</span>
+            </div>
+            <div id="prob-bars" class="prob-bars"></div>
+          </div>
+
+          <!-- Stage 5: Prediction -->
+          <div class="pipe-arrow">→</div>
+          <div class="pipe-stage predicted-stage" id="stage-predict">
+            <div class="stage-header">
+              <span class="stage-title">Predicted Token</span>
+              <span class="stage-sub">Sampled output</span>
+            </div>
+            <div id="predicted-token" class="predicted-token">—</div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- EXPANDED ATTENTION PANEL -->
+      <section id="attention-panel" class="expanded-panel hidden">
+        <div class="panel-header">
+          <span>🔍 Self-Attention — Layer <span id="attn-layer-label">1</span>, Head <span id="attn-head-label">1</span></span>
+          <button onclick="togglePanel('attention-panel')">✕ Close</button>
+        </div>
+        <div class="attn-controls">
+          <label>Layer: <select id="attn-layer" onchange="renderAttention()"></select></label>
+          <label>Head: <select id="attn-head" onchange="renderAttention()"></select></label>
+        </div>
+        <div id="attn-matrix-container" class="attn-matrix-wrap">
+          <svg id="attn-matrix-svg"></svg>
+        </div>
+        <p class="panel-hint">Each cell shows how much the token on the Y-axis attends to the token on the X-axis.</p>
+      </section>
+
+      <!-- SANKEY FLOW (connection lines) -->
+      <svg id="sankey-svg" class="sankey-overlay"></svg>
+
+    </main>
+  </div>
+
+  <!-- ── LOADING OVERLAY ──────────────────────────────────── -->
+  <div id="loading-overlay">
+    <div class="loading-box">
+      <div class="big-spinner"></div>
+      <p>Loading GPT-2 model…</p>
+      <p class="loading-sub">First load may take a moment</p>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
