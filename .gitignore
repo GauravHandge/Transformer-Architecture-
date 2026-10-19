@@ -27,3 +27,9 @@ __pycache__/
 
 .git-old/
 .git/
+ 
+# Official dev artifacts
+official/node_modules/
+official/.svelte-kit/
+official/build/
+official/static/model-v2/

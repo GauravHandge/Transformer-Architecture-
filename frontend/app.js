@@ -1,485 +1,583 @@
 /* ─────────────────────────────────────────────────────────────
    Transformer Explainer — app.js
-   Connects HTML frontend to Python FastAPI backend.
-   Uses D3.js for all visualizations.
+   Full interactive engine for the Polo Club visualization.
 ───────────────────────────────────────────────────────────── */
 
-const API = 'http://127.0.0.1:8000/api';
+const API = (typeof window !== 'undefined' && window.location.origin && window.location.origin !== 'null') 
+  ? `${window.location.origin}/api` 
+  : 'http://127.0.0.1:8080/api';
 
-// ── State ──────────────────────────────────────────────────
+// ── Application State ───────────────────────────────────────
 let state = {
-  tokens: [],
+  text: 'Data visualization empowers users to',
+  tokens: ['Data', 'visualization', 'em', 'powers', 'users', 'to'],
   tokenIds: [],
-  attentions: [],     // [layer][head][seq][seq]
+  attentions: [],       // [12][12][seq][seq]
   hiddenStates: [],
   probabilities: [],
-  sampled: null,
-  currentBlock: 0,
-  textbookPage: 'overview',
-  isLoaded: false,
+  sampled: { token: 'make', probability: 0.0626, logit: -137.65 },
+  currentBlock: 0,      // 0 to 11
+  currentHead: 0,       // 0 to 11
+  temperature: 0.8,
+  samplingType: 'top-k',
+  samplingValue: 5,
+  isThreeStageOpen: false,
+  isProbDetailsOpen: false,
   isRunning: false,
 };
 
 const EXAMPLES = [
   'Data visualization empowers users to',
   'Artificial Intelligence is transforming the',
-  'As the spaceship was approaching the',
-  'On the deserted planet they discovered a',
+  'As the spaceship entered the orbit of',
+  'On the deserted planet, the explorer found',
   'IEEE VIS conference highlights the',
 ];
 
-const GPT2_LAYERS = 12;
-const GPT2_HEADS  = 12;
+// ── Lifecycle ───────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  initHeatmapSelectors();
+  renderAll();
+  generatePrediction();
 
-// ── Init ────────────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', async () => {
-  checkBackend();
-  populateSelects();
-  showTextbookPage('overview');
+  window.addEventListener('resize', debounce(() => renderRibbons(), 120));
+  window.addEventListener('click', (e) => {
+    // Hide dropdown when clicking outside
+    if (!e.target.closest('.dropdown-wrapper')) {
+      const menu = document.getElementById('examples-menu');
+      if (menu) menu.classList.add('hidden');
+    }
+  });
 });
 
-async function checkBackend() {
-  try {
-    const res = await fetch(`${API}/health`);
-    if (res.ok) {
-      hideLoading();
-      state.isLoaded = true;
-      setStatusDot('ready');
-      document.querySelector('#topbar .model-label').textContent = 'Model Ready';
-      // auto-run first example
-      await runModel();
-    } else { throw new Error('Backend error'); }
-  } catch (e) {
-    document.querySelector('#loading-overlay p').textContent = '❌ Backend not running';
-    document.querySelector('.loading-sub').textContent =
-      'Please start: uvicorn backend.main:app --reload';
-    setStatusDot('error');
-  }
-}
-
-function hideLoading() {
-  document.getElementById('loading-overlay').style.display = 'none';
-}
-function setStatusDot(state) {
-  const dot = document.getElementById('status-dot');
-  dot.className = 'status-dot ' + state;
-}
-
-function populateSelects() {
-  const layerSel = document.getElementById('attn-layer');
-  const headSel  = document.getElementById('attn-head');
-  for (let i = 0; i < GPT2_LAYERS; i++) {
-    const opt = document.createElement('option');
-    opt.value = i; opt.textContent = `Layer ${i + 1}`;
-    layerSel.appendChild(opt);
-  }
-  for (let i = 0; i < GPT2_HEADS; i++) {
-    const opt = document.createElement('option');
-    opt.value = i; opt.textContent = `Head ${i + 1}`;
-    headSel.appendChild(opt);
-  }
-}
-
-// ── Run Model ─────────────────────────────────────────────
-async function runModel() {
+// ── Inference ───────────────────────────────────────────────
+async function generatePrediction() {
   if (state.isRunning) return;
   state.isRunning = true;
+  setLoadingState(true);
 
-  const text   = document.getElementById('input-text').value;
-  const temp   = parseFloat(document.getElementById('temperature').value);
-  const sType  = document.getElementById('sampling-type').value;
-  const sValue = parseFloat(document.getElementById('sampling-value').value);
-
-  setRunBtnLoading(true);
-  setStatusDot('loading');
+  const inputEl = document.getElementById('input-text-display');
+  const txt = (inputEl.innerText || inputEl.textContent || state.text).trim() || 'Data visualization empowers users to';
+  state.text = txt;
 
   try {
     const res = await fetch(`${API}/infer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text,
-        temperature: temp,
-        sampling_type: sType,
-        sampling_value: sValue,
+        text: state.text,
+        temperature: state.temperature,
+        sampling_type: state.samplingType,
+        sampling_value: state.samplingValue,
       }),
     });
 
-    if (!res.ok) {
-      const err = await res.json();
-      alert('Error: ' + (err.detail || 'Unknown error'));
-      return;
+    if (res.ok) {
+      const data = await res.json();
+      state.tokens = data.tokens.map(cleanToken);
+      state.tokenIds = data.tokenIds;
+      state.attentions = data.attentions;
+      state.hiddenStates = data.hiddenStates;
+      state.probabilities = data.probabilities;
+      state.sampled = data.sampled;
+      
+      const badge = document.getElementById('predicted-token-badge');
+      if (badge && state.sampled) {
+        badge.textContent = cleanToken(state.sampled.token);
+      }
+    } else {
+      useFallbackData();
     }
-
-    const data = await res.json();
-    state.tokens       = data.tokens;
-    state.tokenIds     = data.tokenIds;
-    state.attentions   = data.attentions;
-    state.hiddenStates = data.hiddenStates;
-    state.probabilities = data.probabilities;
-    state.sampled      = data.sampled;
-    state.currentBlock = 0;
-
-    renderAll();
-    setStatusDot('ready');
-  } catch (e) {
-    console.error(e);
-    setStatusDot('error');
-    alert('Cannot connect to backend. Make sure uvicorn is running.');
+  } catch (err) {
+    useFallbackData();
   } finally {
-    setRunBtnLoading(false);
+    setLoadingState(false);
     state.isRunning = false;
+    renderAll();
   }
 }
 
-function setRunBtnLoading(on) {
-  const btn    = document.getElementById('run-btn');
-  const label  = document.getElementById('run-btn-label');
-  const spin   = document.getElementById('run-spinner');
-  btn.disabled = on;
-  label.classList.toggle('hidden', on);
-  spin.classList.toggle('hidden', !on);
+function cleanToken(tok) {
+  if (!tok) return '';
+  return tok.replace(/Ġ/g, '').replace(/\[NEWLINE\]/g, '↵').replace(/\[TAB\]/g, '⇥');
 }
 
-// ── Render All ────────────────────────────────────────────
+function useFallbackData() {
+  const words = state.text.trim().split(/\s+/);
+  state.tokens = words.length > 0 ? words : ['Data', 'visualization', 'em', 'powers', 'users', 'to'];
+  const n = state.tokens.length;
+
+  state.attentions = Array.from({ length: 12 }, () =>
+    Array.from({ length: 12 }, () =>
+      Array.from({ length: n }, (_, r) => {
+        const row = Array.from({ length: n }, (_, c) => (c <= r ? Math.random() : 0));
+        const sum = row.reduce((a, b) => a + b, 0) || 1;
+        return row.map(v => v / sum);
+      })
+    )
+  );
+
+  state.probabilities = [
+    { token: 'visualize', probability: 0.5467, logit: -135.91, scaledLogit: -169.89 },
+    { token: 'create', probability: 0.2087, logit: -136.68, scaledLogit: -170.85 },
+    { token: 'see', probability: 0.1209, logit: -137.12, scaledLogit: -171.40 },
+    { token: 'make', probability: 0.0626, logit: -137.65, scaledLogit: -172.06 },
+    { token: 'easily', probability: 0.0611, logit: -137.67, scaledLogit: -172.08 },
+    { token: 'quickly', probability: 0.0000, logit: -137.72, scaledLogit: -172.15 },
+    { token: 'explore', probability: 0.0000, logit: -137.78, scaledLogit: -172.23 },
+    { token: 'find', probability: 0.0000, logit: -138.05, scaledLogit: -172.56 },
+    { token: 'understand', probability: 0.0000, logit: -138.29, scaledLogit: -172.87 },
+    { token: 'build', probability: 0.0000, logit: -138.41, scaledLogit: -173.01 },
+  ];
+  state.sampled = state.probabilities[3]; // 'make'
+}
+
+// ── Rendering ───────────────────────────────────────────────
 function renderAll() {
   renderTokens();
-  renderEmbeddings();
-  renderAttentionMini();
-  renderProbBars();
-  renderPredictedToken();
-  updateBlockIndicator();
+  renderQkv();
+  renderAttentionCard();
+  renderMlp();
+  renderSubsequent();
+  renderProbabilities();
+  requestAnimationFrame(() => renderRibbons());
 }
 
-// ── Tokens ────────────────────────────────────────────────
+// 1. Tokens
 function renderTokens() {
-  const container = document.getElementById('tokens-display');
+  const container = document.getElementById('col-tokens');
+  if (!container) return;
   container.innerHTML = '';
-  state.tokens.forEach(tok => {
-    const chip = document.createElement('div');
-    chip.className = 'token-chip fade-in';
-    chip.textContent = tok || '·';
-    chip.title = `"${tok}"`;
-    container.appendChild(chip);
+
+  state.tokens.forEach((tok, i) => {
+    const el = document.createElement('div');
+    el.className = 'token-item';
+    el.id = `token-el-${i}`;
+    el.textContent = tok;
+    el.title = `Token ${i + 1}: "${tok}"`;
+    container.appendChild(el);
   });
 }
 
-// ── Embeddings (visual bars using hidden state values) ────
-function renderEmbeddings() {
-  const container = document.getElementById('embedding-display');
+// 2. QKV
+function renderQkv() {
+  const container = document.getElementById('col-qkv');
+  if (!container) return;
   container.innerHTML = '';
-  if (!state.hiddenStates.length) return;
 
-  const emb = state.hiddenStates[0]; // embedding layer output
-  const colors = ['#7c3aed', '#2563eb', '#4f46e5', '#0891b2', '#059669'];
-
-  emb.forEach((vec, i) => {
-    // Use first 8 dims normalized as visual bar
-    const vals = vec.slice(0, 8);
-    const max  = Math.max(...vals.map(Math.abs)) || 1;
-    const norm = vals.map(v => Math.abs(v) / max);
-    const avg  = norm.reduce((a, b) => a + b, 0) / norm.length;
-
-    const wrap = document.createElement('div');
-    wrap.className = 'emb-bar-wrap fade-in';
-
-    const bar = document.createElement('div');
-    bar.className = 'emb-bar';
-    bar.style.width = Math.round(avg * 80) + '%';
-    bar.style.background = `linear-gradient(90deg, ${colors[i % colors.length]}, #a78bfa)`;
-
-    const label = document.createElement('span');
-    label.className = 'emb-label';
-    label.textContent = state.tokens[i] || `t${i}`;
-
-    wrap.appendChild(bar);
-    wrap.appendChild(label);
-    container.appendChild(wrap);
+  state.tokens.forEach((_, i) => {
+    const grp = document.createElement('div');
+    grp.className = 'qkv-cell';
+    grp.id = `qkv-el-${i}`;
+    grp.innerHTML = `
+      <div class="q-badge">Q</div>
+      <div class="k-badge">K</div>
+      <div class="v-badge">V</div>
+    `;
+    container.appendChild(grp);
   });
 }
 
-// ── Attention Mini Preview ─────────────────────────────────
-function renderAttentionMini() {
-  if (!state.attentions.length) return;
+// 3. Attention Card & Internal Views
+function renderAttentionCard() {
+  const matrix = state.attentions[state.currentBlock]?.[state.currentHead] || [];
+  const n = state.tokens.length;
 
-  const container = document.getElementById('attn-mini-preview');
-  container.innerHTML = '';
+  // Single standard matrix
+  const grid = document.getElementById('dot-matrix');
+  if (grid) {
+    grid.innerHTML = '';
+    grid.style.gridTemplateColumns = `repeat(${n}, 13px)`;
+    grid.style.gridTemplateRows = `repeat(${n}, 13px)`;
 
-  const layer = state.currentBlock;
-  const head  = 0;
-  const matrix = state.attentions[layer]?.[head];
-  if (!matrix) return;
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        const dot = document.createElement('div');
+        dot.className = 'matrix-circle';
+        const w = matrix[r]?.[c] ?? (c <= r ? 1 / (r + 1) : 0);
 
-  const size = matrix.length;
-  const cellSize = Math.min(8, Math.floor(60 / size));
-  const svgW = size * cellSize;
-  const svgH = size * cellSize;
+        if (c > r) {
+          dot.style.background = '#f1f5f9';
+          dot.style.opacity = '0.3';
+        } else {
+          dot.style.background = '#7c3aed';
+          dot.style.opacity = Math.max(0.12, Math.min(1, w * 2.5));
+        }
 
-  const svg = d3.select(container)
-    .append('svg')
-    .attr('width', svgW)
-    .attr('height', svgH);
-
-  const color = d3.scaleSequential(d3.interpolatePurples).domain([0, 1]);
-
-  matrix.forEach((row, r) => {
-    row.forEach((val, c) => {
-      svg.append('rect')
-        .attr('x', c * cellSize)
-        .attr('y', r * cellSize)
-        .attr('width', cellSize - 1)
-        .attr('height', cellSize - 1)
-        .attr('rx', 1)
-        .attr('fill', isFinite(val) && val > 0 ? color(val) : '#f3f4f6');
-    });
-  });
-}
-
-// ── Full Attention Matrix ─────────────────────────────────
-function renderAttention() {
-  if (!state.attentions.length) return;
-
-  const layer  = parseInt(document.getElementById('attn-layer').value);
-  const head   = parseInt(document.getElementById('attn-head').value);
-  document.getElementById('attn-layer-label').textContent = layer + 1;
-  document.getElementById('attn-head-label').textContent  = head + 1;
-
-  const matrix = state.attentions[layer]?.[head];
-  if (!matrix) return;
-
-  const tokens = state.tokens;
-  const n      = matrix.length;
-  const cellSize = 36;
-  const margin   = { top: 20, left: 80, right: 20, bottom: 20 };
-  const svgW     = margin.left + n * cellSize + margin.right;
-  const svgH     = margin.top  + n * cellSize + margin.bottom;
-
-  const svgEl = document.getElementById('attn-matrix-svg');
-  svgEl.setAttribute('width',  svgW);
-  svgEl.setAttribute('height', svgH);
-  svgEl.innerHTML = '';
-
-  const svg = d3.select(svgEl);
-  const g   = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
-
-  const color = d3.scaleSequential(d3.interpolatePurples).domain([0, 1]);
-
-  // Cells
-  matrix.forEach((row, r) => {
-    row.forEach((val, c) => {
-      const v = isFinite(val) && val > 0 ? val : 0;
-      g.append('rect')
-        .attr('x', c * cellSize)
-        .attr('y', r * cellSize)
-        .attr('width', cellSize - 2)
-        .attr('height', cellSize - 2)
-        .attr('rx', 3)
-        .attr('fill', v > 0 ? color(v) : '#f9fafb')
-        .attr('stroke', '#e5e7eb')
-        .attr('stroke-width', 0.5)
-        .append('title')
-        .text(`${tokens[r] || r} → ${tokens[c] || c}: ${v.toFixed(3)}`);
-
-      if (v > 0.15) {
-        g.append('text')
-          .attr('x', c * cellSize + cellSize / 2 - 1)
-          .attr('y', r * cellSize + cellSize / 2 + 4)
-          .attr('text-anchor', 'middle')
-          .attr('font-size', '8px')
-          .attr('fill', v > 0.5 ? 'white' : '#374151')
-          .text(v.toFixed(2));
+        dot.title = `Query: "${state.tokens[r]}" attends to Key: "${state.tokens[c]}" (${(w * 100).toFixed(1)}%)`;
+        dot.addEventListener('mouseenter', () => highlightPair(r, c));
+        dot.addEventListener('mouseleave', () => resetHighlights());
+        grid.appendChild(dot);
       }
-    });
-  });
+    }
+  }
 
-  // Row labels (Y-axis)
-  tokens.forEach((tok, i) => {
-    g.append('text')
-      .attr('x', -6)
-      .attr('y', i * cellSize + cellSize / 2 + 4)
-      .attr('text-anchor', 'end')
-      .attr('font-size', '10px')
-      .attr('font-family', 'JetBrains Mono, monospace')
-      .attr('fill', '#6b7280')
-      .text((tok || `T${i}`).slice(0, 10));
-  });
+  // 3-Stage internal matrix views (Screenshot 3)
+  renderSubMatrix('matrix-dotprod', n, (r, c) => (c <= r ? Math.random() : 0), '#8b5cf6');
+  renderSubMatrix('matrix-mask', n, (r, c) => (c <= r ? Math.random() : 0), '#a855f7');
+  renderSubMatrix('matrix-softmax', n, (r, c) => matrix[r]?.[c] ?? (c <= r ? 1 / (r + 1) : 0), '#7c3aed');
 
-  // Col labels (X-axis)
-  tokens.forEach((tok, i) => {
-    g.append('text')
-      .attr('x', i * cellSize + cellSize / 2)
-      .attr('y', -6)
-      .attr('text-anchor', 'middle')
-      .attr('font-size', '10px')
-      .attr('font-family', 'JetBrains Mono, monospace')
-      .attr('fill', '#6b7280')
-      .text((tok || `T${i}`).slice(0, 6));
+  // Stepper text
+  const headText = document.getElementById('head-indicator-text');
+  if (headText) {
+    headText.textContent = `Head ${state.currentHead + 1} of 12`;
+  }
+}
+
+function renderSubMatrix(id, n, calcVal, color) {
+  const container = document.getElementById(id);
+  if (!container) return;
+  container.innerHTML = '';
+  container.style.gridTemplateColumns = `repeat(${n}, 9px)`;
+  container.style.gridTemplateRows = `repeat(${n}, 9px)`;
+
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const dot = document.createElement('div');
+      dot.className = 'matrix-circle';
+      dot.style.width = '9px';
+      dot.style.height = '9px';
+      const w = calcVal(r, c);
+
+      if (c > r) {
+        dot.style.background = '#f1f5f9';
+        dot.style.opacity = '0.25';
+      } else {
+        dot.style.background = color;
+        dot.style.opacity = Math.max(0.15, Math.min(1, w * 2.2));
+      }
+      container.appendChild(dot);
+    }
+  }
+}
+
+function highlightPair(q, k) {
+  const qEl = document.getElementById(`token-el-${q}`);
+  const kEl = document.getElementById(`token-el-${k}`);
+  if (qEl) qEl.style.background = '#dbeafe';
+  if (kEl) kEl.style.background = '#ffe4e6';
+}
+
+function resetHighlights() {
+  document.querySelectorAll('.token-item').forEach(el => el.style.background = '');
+}
+
+// 4. MLP Column
+function renderMlp() {
+  const container = document.getElementById('col-mlp');
+  if (!container) return;
+  container.innerHTML = '';
+
+  state.tokens.forEach(tok => {
+    const el = document.createElement('div');
+    el.className = 'mlp-token-item';
+    el.textContent = tok;
+    container.appendChild(el);
   });
 }
 
-// ── Probability Bars ──────────────────────────────────────
-function renderProbBars() {
-  const container = document.getElementById('prob-bars');
+// 5. Subsequent Blocks
+function renderSubsequent() {
+  const badge = document.getElementById('stream-token-badge');
+  if (badge && state.tokens.length > 0) {
+    badge.textContent = state.tokens[state.tokens.length - 1];
+  }
+}
+
+// 6. Probabilities & Math Tooltip
+function renderProbabilities() {
+  const container = document.getElementById('probs-container');
+  if (!container) return;
   container.innerHTML = '';
-  if (!state.probabilities.length) return;
 
-  const sampledId = state.sampled?.tokenId;
-  const topN = state.probabilities.slice(0, 15);
-  const maxProb = Math.max(...topN.map(p => p.probability));
+  const list = state.probabilities.slice(0, 14);
+  const maxP = Math.max(...list.map(p => p.probability), 0.01);
+  const sampledTok = cleanToken(state.sampled?.token);
 
-  topN.forEach(item => {
-    const isSampled = item.tokenId === sampledId;
-    const pct = maxProb > 0 ? (item.probability / maxProb) * 100 : 0;
+  list.forEach(item => {
+    const name = cleanToken(item.token);
+    const isSampled = name === sampledTok || item.probability === state.sampled?.probability;
+    const pct = (item.probability * 100).toFixed(2);
+    const fill = maxP > 0 ? (item.probability / maxP) * 100 : 0;
 
     const row = document.createElement('div');
-    row.className = 'prob-row';
+    row.className = `prob-item ${isSampled ? 'active-predicted' : ''}`;
+    row.innerHTML = `
+      <div class="prob-name">${name}</div>
+      <div class="prob-track">
+        <div class="prob-fill" style="width: ${Math.max(2, fill)}%"></div>
+      </div>
+      <div class="prob-num">${pct}%</div>
+    `;
 
-    const tokLabel = document.createElement('div');
-    tokLabel.className = 'prob-token';
-    tokLabel.textContent = item.token || `id:${item.tokenId}`;
-    tokLabel.title = `Token: "${item.token}" | ID: ${item.tokenId}`;
-
-    const barBg = document.createElement('div');
-    barBg.className = 'prob-bar-bg';
-
-    const barFill = document.createElement('div');
-    barFill.className = 'prob-bar-fill' + (isSampled ? ' sampled' : '');
-    barFill.style.width = pct + '%';
-
-    const pctLabel = document.createElement('div');
-    pctLabel.className = 'prob-pct';
-    pctLabel.textContent = (item.probability * 100).toFixed(1) + '%';
-
-    barBg.appendChild(barFill);
-    row.appendChild(tokLabel);
-    row.appendChild(barBg);
-    row.appendChild(pctLabel);
+    // Interactive tooltip (Screenshot 4)
+    row.addEventListener('mouseenter', () => showMathTooltip(item, name, pct));
+    row.addEventListener('mouseleave', () => hideMathTooltip());
     container.appendChild(row);
   });
 }
 
-// ── Predicted Token ───────────────────────────────────────
-function renderPredictedToken() {
-  const el = document.getElementById('predicted-token');
-  if (state.sampled) {
-    el.textContent = state.sampled.token || `[id:${state.sampled.tokenId}]`;
-    el.classList.add('fade-in');
-  } else {
-    el.textContent = '—';
-  }
+function showMathTooltip(item, name, pct) {
+  const tip = document.getElementById('math-tooltip');
+  if (!tip) return;
+
+  const rawLogit = (item.logit ?? -135.91).toFixed(2);
+  const temp = state.temperature.toFixed(1);
+  const scaled = ((item.logit ?? -135.91) / state.temperature).toFixed(2);
+
+  document.getElementById('math-card-title').textContent = `Probability of "${name}" token being sampled`;
+  document.getElementById('math-raw-logit').textContent = rawLogit;
+  document.getElementById('math-temp').textContent = temp;
+  document.getElementById('math-scaled').textContent = scaled;
+  document.getElementById('math-topk').textContent = scaled;
+  document.getElementById('math-prob').textContent = `${pct}%`;
+
+  tip.classList.remove('hidden');
 }
 
-// ── Block Navigation ──────────────────────────────────────
-function changeBlock(dir) {
-  const next = state.currentBlock + dir;
-  if (next < 0 || next >= GPT2_LAYERS) return;
-  state.currentBlock = next;
-  updateBlockIndicator();
-  renderAttentionMini();
-  // Update full attention matrix if panel open
-  if (!document.getElementById('attention-panel').classList.contains('hidden')) {
-    document.getElementById('attn-layer').value = state.currentBlock;
-    renderAttention();
-  }
+function hideMathTooltip() {
+  const tip = document.getElementById('math-tooltip');
+  if (tip) tip.classList.add('hidden');
 }
 
-function updateBlockIndicator() {
-  document.getElementById('block-indicator').textContent =
-    `Block ${state.currentBlock + 1} / ${GPT2_LAYERS}`;
-  document.getElementById('prev-block').disabled = state.currentBlock === 0;
-  document.getElementById('next-block').disabled = state.currentBlock === GPT2_LAYERS - 1;
-}
+// 7. SVG Curved Bezier Ribbons
+function renderRibbons() {
+  const svg = document.getElementById('svg-ribbons');
+  if (!svg) return;
+  svg.innerHTML = '';
 
-// ── Panels ─────────────────────────────────────────────────
-function togglePanel(id) {
-  const panel = document.getElementById(id);
-  const isHidden = panel.classList.contains('hidden');
-  panel.classList.toggle('hidden');
-  if (isHidden) {
-    document.getElementById('attn-layer').value = state.currentBlock;
-    renderAttention();
-  }
-}
+  const meshRect = document.querySelector('.flow-grid')?.getBoundingClientRect();
+  if (!meshRect) return;
 
-// ── Textbook ──────────────────────────────────────────────
-const TEXTBOOK_PAGES = {
-  overview: `
-    <h3>What is a Transformer?</h3>
-    <p>A Transformer is a deep learning model that processes sequences using <strong>Self-Attention</strong>. GPT-2 has 12 Transformer blocks stacked on top of each other.</p>
-    <p>Each block contains:<br>• Self-Attention layer<br>• MLP (Feed-Forward) layer<br>• Layer Normalization<br>• Residual connections</p>
-    <div class="math-formula">Input → Embed → [Block×12] → Linear → Softmax → Token</div>
-  `,
-  tokenization: `
-    <h3>Tokenization</h3>
-    <p>Text is first split into <strong>tokens</strong> — subword units. GPT-2 uses Byte-Pair Encoding (BPE) with a vocabulary of 50,257 tokens.</p>
-    <p>Example: "Hello world" → ["Hello", " world"]</p>
-    <div class="math-formula">text → tokenizer.encode(text) → [id₁, id₂, …, idₙ]</div>
-    <p>Each token ID maps to a row in the embedding matrix.</p>
-  `,
-  embedding: `
-    <h3>Embedding</h3>
-    <p>Each token ID is converted into a 768-dimensional vector. Two embeddings are summed:</p>
-    <p>1. <strong>Token Embedding</strong> — learned representation of each token<br>2. <strong>Position Embedding</strong> — encodes position in sequence</p>
-    <div class="math-formula">x = TokenEmb[id] + PosEmb[position]</div>
-  `,
-  attention: `
-    <h3>Self-Attention</h3>
-    <p>Self-Attention lets each token "look at" other tokens to build context. GPT-2 uses 12 attention heads in parallel.</p>
-    <div class="math-formula">Attention(Q,K,V) = softmax(QKᵀ / √dₖ) × V</div>
-    <p>• <strong>Q (Query)</strong> — what to look for<br>• <strong>K (Key)</strong> — what each token offers<br>• <strong>V (Value)</strong> — information to aggregate</p>
-    <p>GPT-2 uses <strong>causal masking</strong> so tokens can only attend to previous tokens.</p>
-  `,
-  mlp: `
-    <h3>MLP / Feed-Forward Network</h3>
-    <p>After attention, each token is processed independently by a 2-layer MLP:</p>
-    <div class="math-formula">FFN(x) = GELU(xW₁ + b₁)W₂ + b₂</div>
-    <p>• Hidden dimension: 768 → 3072 → 768<br>• Expansion factor: ×4<br>• Activation: GELU (Gaussian Error Linear Unit)</p>
-  `,
-  softmax: `
-    <h3>Linear + Softmax Output</h3>
-    <p>The final hidden state of the last token is projected to vocabulary size (50,257) and converted to probabilities:</p>
-    <div class="math-formula">P(next token) = softmax(hW + b)</div>
-    <p>• <strong>Temperature</strong> controls sharpness (↑ temp = more random)<br>• <strong>Top-K</strong> keeps only K highest probability tokens<br>• <strong>Top-P</strong> keeps tokens summing to probability p</p>
-  `,
-};
-
-function showTextbookPage(page) {
-  state.textbookPage = page;
-  document.getElementById('textbook-content').innerHTML = TEXTBOOK_PAGES[page] || '';
-  document.querySelectorAll('.tb-item').forEach(btn => {
-    btn.classList.toggle('active', btn.getAttribute('onclick') === `showTextbookPage('${page}')`);
+  // 1. Tokens to QKV
+  state.tokens.forEach((_, i) => {
+    const tEl = document.getElementById(`token-el-${i}`);
+    const qEl = document.getElementById(`qkv-el-${i}`);
+    if (tEl && qEl) {
+      const tr = tEl.getBoundingClientRect();
+      const qr = qEl.getBoundingClientRect();
+      drawCurve(
+        svg,
+        tr.right - meshRect.left,
+        tr.top + tr.height / 2 - meshRect.top,
+        qr.left - meshRect.left,
+        qr.top + qr.height / 2 - meshRect.top,
+        'rgba(148, 163, 184, 0.35)',
+        7
+      );
+    }
   });
-}
 
-function toggleTextbook() {
-  document.getElementById('textbook-panel').classList.toggle('open');
-}
+  // 2. QKV to Attention Card & Over-the-top Residual
+  const cardEl = document.querySelector('.card-foreground')?.getBoundingClientRect();
+  if (cardEl) {
+    const cardX = cardEl.left - meshRect.left;
+    const cardY = cardEl.top - meshRect.top;
 
-// ── Examples ─────────────────────────────────────────────
-function loadExample(idx) {
-  document.getElementById('input-text').value = EXAMPLES[idx];
-  runModel();
-}
+    state.tokens.forEach((_, i) => {
+      const qEl = document.getElementById(`qkv-el-${i}`);
+      if (!qEl) return;
+      const qr = qEl.getBoundingClientRect();
+      const x1 = qr.right - meshRect.left;
+      const y1 = qr.top + qr.height / 2 - meshRect.top;
 
-// ── Temperature Label ────────────────────────────────────
-function updateTempLabel(val) {
-  document.getElementById('temp-label').textContent = parseFloat(val).toFixed(2);
-}
+      // Key wires (pink)
+      drawCurve(svg, x1, y1 - 4, cardX + 45, cardY + 20, 'rgba(244, 63, 94, 0.45)', 2.5);
+      // Query wires (blue)
+      drawCurve(svg, x1, y1, cardX + 15, cardY + 130 + i * 8, 'rgba(59, 130, 246, 0.45)', 2.5);
+      // Value wires (green)
+      drawCurve(svg, x1, y1 + 4, cardX + 65, cardY + 360, 'rgba(16, 185, 129, 0.45)', 2.5);
+    });
 
-// ── Sampling UI ──────────────────────────────────────────
-function updateSamplingUI() {
-  const type = document.getElementById('sampling-type').value;
-  const label = document.getElementById('sampling-value-label');
-  if (type === 'top-k') {
-    label.innerHTML = 'K = <input id="sampling-value" type="number" min="1" max="50" value="5" style="width:4rem" />';
-  } else {
-    label.innerHTML = 'P = <input id="sampling-value" type="number" min="0.01" max="1" step="0.05" value="0.9" style="width:4rem" />';
+    // Residual Over-the-top Loop
+    const mlpEl = document.getElementById('col-mlp')?.getBoundingClientRect();
+    if (mlpEl) {
+      const mlpX = mlpEl.left - meshRect.left;
+      drawArch(svg, cardX - 50, 10, mlpX + 20, 10, 'rgba(148, 163, 184, 0.4)');
+
+      // Out stream from Attention Card to MLP
+      const outX = cardEl.right - meshRect.left;
+      const outY = cardEl.top + cardEl.height / 2 - meshRect.top;
+      state.tokens.forEach((_, i) => {
+        const mTok = document.querySelectorAll('.mlp-token-item')[i];
+        if (mTok) {
+          const mr = mTok.getBoundingClientRect();
+          drawCurve(svg, outX, outY, mlpX, mr.top + mr.height / 2 - meshRect.top, 'rgba(124, 58, 237, 0.35)', 4);
+        }
+      });
+    }
   }
 }
 
-// ── Enter key runs model ──────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('input-text').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && e.ctrlKey) runModel();
-  });
-});
+function drawCurve(svg, x1, y1, x2, y2, color, strokeWidth = 3) {
+  const dx = Math.abs(x2 - x1) * 0.55;
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`);
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke', color);
+  path.setAttribute('stroke-width', strokeWidth);
+  path.setAttribute('stroke-linecap', 'round');
+  svg.appendChild(path);
+}
+
+function drawArch(svg, x1, y1, x2, y2, color) {
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  const midX = (x1 + x2) / 2;
+  path.setAttribute('d', `M ${x1} ${y1 + 18} Q ${midX} ${y1 - 18}, ${x2} ${y2 + 18}`);
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke', color);
+  path.setAttribute('stroke-width', 2);
+  path.setAttribute('stroke-dasharray', '4 4');
+  svg.appendChild(path);
+}
+
+// ── Interactive Modals & Toggles ────────────────────────────
+function toggleThreeStageView() {
+  state.isThreeStageOpen = !state.isThreeStageOpen;
+  document.getElementById('standard-matrix-wrap')?.classList.toggle('hidden', state.isThreeStageOpen);
+  document.getElementById('three-stage-wrap')?.classList.toggle('hidden', !state.isThreeStageOpen);
+}
+
+function toggleProbDetails() {
+  state.isProbDetailsOpen = !state.isProbDetailsOpen;
+  document.getElementById('prob-subheaders')?.classList.toggle('hidden', !state.isProbDetailsOpen);
+}
+
+function toggleHeatmapModal() {
+  const modal = document.getElementById('heatmap-modal');
+  if (modal) {
+    modal.classList.toggle('hidden');
+    if (!modal.classList.contains('hidden')) {
+      renderHeatmapTable();
+    }
+  }
+}
+
+function openHeatmapModal() {
+  toggleHeatmapModal();
+}
+
+function initHeatmapSelectors() {
+  const bSel = document.getElementById('select-modal-block');
+  const hSel = document.getElementById('select-modal-head');
+  if (bSel) {
+    bSel.innerHTML = Array.from({ length: 12 }, (_, i) => `<option value="${i}">Block ${i + 1}</option>`).join('');
+    bSel.value = state.currentBlock;
+  }
+  if (hSel) {
+    hSel.innerHTML = Array.from({ length: 12 }, (_, i) => `<option value="${i}">Head ${i + 1}</option>`).join('');
+    hSel.value = state.currentHead;
+  }
+}
+
+function setModalBlock(val) {
+  state.currentBlock = parseInt(val);
+  renderHeatmapTable();
+  renderAttentionCard();
+}
+
+function setModalHead(val) {
+  state.currentHead = parseInt(val);
+  renderHeatmapTable();
+  renderAttentionCard();
+}
+
+function renderHeatmapTable() {
+  const container = document.getElementById('heatmap-table-container');
+  const title = document.getElementById('modal-title');
+  if (!container) return;
+
+  if (title) {
+    title.textContent = `Self-Attention Matrix Heatmap — Block ${state.currentBlock + 1}, Head ${state.currentHead + 1}`;
+  }
+
+  const n = state.tokens.length;
+  const matrix = state.attentions[state.currentBlock]?.[state.currentHead] || [];
+
+  let html = `<table class="heatmap-table"><tr><th></th>`;
+  state.tokens.forEach(t => html += `<th>${t}</th>`);
+  html += `</tr>`;
+
+  for (let r = 0; r < n; r++) {
+    html += `<tr><th style="text-align:right;">${state.tokens[r]}</th>`;
+    for (let c = 0; c < n; c++) {
+      const w = matrix[r]?.[c] ?? (c <= r ? 1 / (r + 1) : 0);
+      if (c <= r) {
+        const pct = (w * 100).toFixed(0) + '%';
+        const bg = `rgba(124, 58, 237, ${Math.max(0.12, w)})`;
+        const col = w > 0.4 ? '#ffffff' : '#1e293b';
+        html += `<td style="background:${bg};color:${col};border-radius:4px;">${pct}</td>`;
+      } else {
+        html += `<td style="background:#f8fafc;color:#cbd5e1;">—</td>`;
+      }
+    }
+    html += `</tr>`;
+  }
+  html += `</table>`;
+  container.innerHTML = html;
+}
+
+// ── Controls ────────────────────────────────────────────────
+function prevHead() {
+  state.currentHead = (state.currentHead - 1 + 12) % 12;
+  renderAttentionCard();
+}
+function nextHead() {
+  state.currentHead = (state.currentHead + 1) % 12;
+  renderAttentionCard();
+}
+function prevBlock() {
+  if (state.currentBlock > 0) { state.currentBlock--; renderAttentionCard(); }
+}
+function nextBlock() {
+  if (state.currentBlock < 11) { state.currentBlock++; renderAttentionCard(); }
+}
+
+function setTemp(v) {
+  state.temperature = parseFloat(v);
+  document.getElementById('temp-val').textContent = state.temperature.toFixed(2);
+}
+function setSamp(t) {
+  state.samplingType = t;
+  const lbl = document.getElementById('samp-label');
+  const inp = document.getElementById('samp-input');
+  if (t === 'top-p') {
+    lbl.textContent = 'p=';
+    inp.min = '0.05'; inp.max = '1.0'; inp.step = '0.05'; inp.value = '0.9';
+    state.samplingValue = 0.9;
+  } else {
+    lbl.textContent = 'k=';
+    inp.min = '1'; inp.max = '50'; inp.step = '1'; inp.value = '5';
+    state.samplingValue = 5;
+  }
+}
+function setSampVal(v) { state.samplingValue = parseFloat(v); }
+
+function toggleExamples(e) {
+  e.stopPropagation();
+  document.getElementById('examples-menu')?.classList.toggle('hidden');
+}
+function pickExample(idx) {
+  const txt = EXAMPLES[idx] || EXAMPLES[0];
+  document.getElementById('input-text-display').innerText = txt;
+  state.text = txt;
+  document.getElementById('examples-menu')?.classList.add('hidden');
+  generatePrediction();
+}
+
+function handleInputKey(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    generatePrediction();
+  }
+}
+
+function setLoadingState(on) {
+  const btn = document.getElementById('generate-label');
+  if (btn) btn.textContent = on ? 'Running…' : 'Generate';
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}

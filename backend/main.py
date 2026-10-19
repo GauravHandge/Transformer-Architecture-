@@ -75,12 +75,13 @@ def top_k_sampling(logits_np, token_ids_list, k=5, temperature=0.8):
     ):
         token_str = tokenizer.decode([int(idx)])
         token_str = format_token(token_str)
+        top_k_logit = float(filtered[rank]) if np.isfinite(filtered[rank]) else None
         probabilities.append({
             "tokenId": int(idx),
             "token": token_str,
             "logit": float(logit),
             "scaledLogit": float(scaled_l),
-            "topKLogit": float(filtered[rank]),
+            "topKLogit": top_k_logit,
             "expLogit": float(exp_l),
             "probability": float(prob),
             "rank": rank,
