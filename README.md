@@ -107,7 +107,7 @@ Transformer-Architecture/
 * **Gaurav Handge**
   * GitHub: [@GauravHandge](https://github.com/GauravHandge)
   * Repository: [Transformer-Architecture-](https://github.com/GauravHandge/Transformer-Architecture-)
-  * Email: [gaurav.handge@voyatekgroup.com](mailto:gaurav.handge@voyatekgroup.com)
+  * Email: [gauravhandge770903@gmail.com](mailto:gauravhandge770903@gmail.com)
 
 ---
 
